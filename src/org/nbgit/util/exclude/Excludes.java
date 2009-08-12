@@ -45,14 +45,24 @@ import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
 import java.io.IOException;
-import java.util.HashMap;
+import java.util.Collections;
+import java.util.Date;
 import java.util.HashSet;
+import java.util.Hashtable;
 import java.util.List;
+import java.util.Map;
 import java.util.Set;
+import java.util.Timer;
+import java.util.TimerTask;
 import java.util.Vector;
 import org.nbgit.Git;
 import org.netbeans.api.project.ProjectManager;
 import org.netbeans.api.queries.SharabilityQuery;
+import org.openide.filesystems.FileAttributeEvent;
+import org.openide.filesystems.FileChangeAdapter;
+import org.openide.filesystems.FileEvent;
+import org.openide.filesystems.FileObject;
+import org.openide.filesystems.FileRenameEvent;
 import org.openide.filesystems.FileUtil;
 import org.spearce.jgit.lib.Repository;
 
@@ -65,21 +75,46 @@ public class Excludes {
 
     private Excludes() {
     }
-
     private static final String FILENAME_GITIGNORE = ".gitignore"; // NOI18N
-    private static HashMap<String, List<PathPattern>> ignorePatterns;
+    private final static Map<String, List<PathPattern>> ignorePatterns = new Hashtable<String, List<PathPattern>>();
+    private final static Timer timer = new Timer();
+    private final static TimerTask externalChangeTrackerTask;
+    private final static int DELAY = 5000;
+
+    static {
+        externalChangeTrackerTask = new TimerTask() {
+
+            private final Date lastChecked = new Date();
+
+            @Override
+            public void run() {
+                final Set<String> absPathSet = ignorePatterns.keySet();
+                for (String absPath : absPathSet) {
+                    final File file = new File(absPath);
+                    FileObject fileObject = FileUtil.toFileObject(file);
+                    if (file.exists() && fileObject.lastModified().after(lastChecked)) {
+                        fileObject.refresh();
+                    }
+                }
+                lastChecked.setTime(System.currentTimeMillis());
+            }
+        };
+        timer.schedule(externalChangeTrackerTask, DELAY, DELAY);
+    }
 
     private static List<PathPattern> getIgnorePatterns(File file) {
-        if (ignorePatterns == null) {
-            ignorePatterns = new HashMap<String, List<PathPattern>>();
-        }
         String key = file.getAbsolutePath();
         List<PathPattern> patterns = ignorePatterns.get(key);
-        if (patterns == null) {
+        if (patterns == null && file.exists() && !file.isDirectory()) {
             patterns = readIgnorePatterns(file);
+            if (!ignorePatterns.keySet().contains(key)) {
+                monitorFileChange(key);
+            }
             if (!patterns.isEmpty()) {
                 ignorePatterns.put(key, patterns);
             }
+        } else if (patterns == null) {
+            patterns = Collections.emptyList();
         }
         return patterns;
     }
@@ -160,6 +195,36 @@ public class Excludes {
             return true;
         }
         return false;
+    }
+
+    private static void monitorFileChange(final String key) {
+        final FileObject fileObject = FileUtil.toFileObject(new File(key));
+        fileObject.addFileChangeListener(new FileChangeAdapter() {
+
+            private void evictPatterns() {
+                ignorePatterns.remove(key);
+            }
+
+            @Override
+            public void fileChanged(FileEvent fe) {
+                evictPatterns();
+            }
+
+            @Override
+            public void fileAttributeChanged(FileAttributeEvent fe) {
+                evictPatterns();
+            }
+
+            @Override
+            public void fileDeleted(FileEvent fe) {
+                evictPatterns();
+            }
+
+            @Override
+            public void fileRenamed(FileRenameEvent fe) {
+                evictPatterns();
+            }
+        });
     }
 
     private static String stripWorkDir(File wd, File f) {
